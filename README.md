@@ -130,6 +130,238 @@ Your final subnet setup should be similar to this. Verify that you have 3 subnet
 
 ## Database Deployment - Part 2
 
+- Deploy Database Layer
+  - Subnet Groups
+  - Multi-AZ Database
+
+### Subnet Groups
+
+1. Navigate to the RDS dashboard in the AWS console and click on Subnet groups on the left hand side. Click Create DB subnet group.
+2. Give your subnet group a name, description, and choose the VPC we created.
+   <image>
+3. When adding subnets, make sure to add the subnets we created in each availability zone specificaly for our database layer. You may have to navigate back to the VPC dashboard and check to make sure you're selecting the correct subnet IDs.
+   <image>
+
+### Multi-AZ Database Deployment
+
+1. Navigate to Databases on the left hand side of the RDS dashboard and click Create database.
+2. We'll now go through several configuration steps. Start with a Standard create for this MySQL-Compatible Amazon Aurora database. Leave the rest of the defaults in the Engine options as default.
+   <image>
+   Under the Templates section choose Dev/Test since this isn't being used for production at the moment. Under Settings set a username and password of your choice and note them down since we'll be using password authentication to access our database.
+   <image>
+   Next, under Availability and durability change the option to create an Aurora Replica or reader node in a different availability zone. Under Connectivity, set the VPC, choose the subnet group we created earlier, and select no for public access.
+   <image>
+   Set the security group we created for the database layer, make sure password authentication is selected as our authentication choice, and create the database.
+   <image>
+3. When your database is provisioned, you should see a reader and writer instance in the database subnets of each availability zone. Note down the writer endpoint for your database for later use.
+   <image>
+
+## App Tier Instance Deployment - Part 3
+
+In this section, we will create an EC2 instance for our app layer and make all necessary software configurations so that the app can run. The app layer consists of a Node.js application that will run on port 4000. We will also configure our database with some data and tables.
+
+- Learning Objectives:
+  - Create App Tier Instance
+  - Configure Software Stack
+  - Configure Database Schema
+  - Test DB connectivity
+
+### App Instance Deployment
+
+1. Navigate to the EC2 service dashboard and click on Instances on the left hand side. Then, click Launch Instances.
+2. Select the first Amazon Linux 2 AMI
+3. We'll be using the free tier eligible <b>T.2 micro</b> instance type. Select that and click Next: Configure Instance Details.
+4. When configuring the instance details, make sure to select to correct Network, subnet, and IAM role we created. Note that this is the app layer, so use one of the private subnets we created for this layer.
+   <image>
+5. We'll be keeping the defaults for storage so click next twice. When you get to the tag screen input a Name as a key and call the instance AppLayer. It's a good idea to tag your instances so you can easily keep track of what each instance was created for. Click Next: Configure Security Group.
+   <image>
+6. Earlier we created a security group for our private app layer instances, so go ahead and select that in this next section. Then click Review and Launch. Ignore the warning about connecting to port 22- we don't need to do that.
+7. When you get to the Review Instance Launch page, review the details you configured and click Launch. You'll see a pop up about creating a key pair. Since we are using Systems Manager Session Manager to connect to the instance, proceed without a keypair. Click Launch.
+   You'll be taken to a page where you can click launch instance, and you'll see the instance you just launched.
+
+### Connect to Instance
+
+1. Navigate to your list of running EC2 Instances by clicking on Instances on the left hand side of the EC2 dashboard. When the instance state is running, connect to your instance by clicking the checkmark box to the left of the instance, and click the connect button on the top right corner of the dashboard.Select the Session Manager tab, and click connect. This will open a new browser tab for you.
+
+   <b>NOTE</b>: <i>If you get a message saying that you cannot connect via session manager, then check that your instances can route to your NAT gateways and verify that you gave the necessary permissions on the IAM role for the Ec2 instance. </i>
+
+2. When you first connect to your instance like this, you will be logged in as ssm-user which is the default user. Switch to ec2-user by executing the following command in the browser terminal:
+   ```
+   sudo -su ec2-user
+   ```
+3. Let’s take this moment to make sure that we are able to reach the internet via our NAT gateways. If your network is configured correctly up till this point, you should be able to ping the google DNS servers:
+
+   ```
+   ping 8.8.8.8
+   ```
+
+   You should see a transmission of packets. Stop it by pressing Cntrl+C
+
+   <b>NOTE:</b> <i>If you can’t reach the internet then you need to double check your route tables and subnet associations to verify if traffic is being routed to your NAT gateway! </i>
+
+### Configure Database
+
+1. Start by downloading the MySQL CLI:
+   ```
+   sudo yum install mysql -y
+   ```
+2. Initiate your DB connection with your Aurora RDS writer endpoint. In the following command, replace the RDS writer endpoint and the username, and then execute it in the browser terminal:
+
+   ```
+   mysql -h CHANGE-TO-YOUR-RDS-ENDPOINT -u CHANGE-TO-USER-NAME -p
+   ```
+
+   You will then be prompted to type in your password. Once you input the password and hit enter, you should now be connected to your database.
+
+   <b>NOTE:</b> If you cannot reach your database, check your credentials and security groups.
+
+3. Create a database called webappdb with the following command using the MySQL CLI:
+   ```
+   CREATE DATABASE webappdb;
+   ```
+   You can verify that it was created correctly with the following command:
+   ```
+   SHOW DATABASES;
+   ```
+4. Create a data table by first navigating to the database we just created:
+   ```
+   USE webappdb;
+   ```
+   Then, create the following transactions table by executing this create table command:
+   ```
+   CREATE TABLE IF NOT EXISTS transactions(id INT NOT NULL AUTO_INCREMENT, amount DECIMAL(10,2), description VARCHAR(100), PRIMARY KEY(id));
+   ```
+   Verify the table was created:
+   ```
+   SHOW TABLES;
+   ```
+5. Insert data into table for use/testing later:
+   ```
+   INSERT INTO transactions (amount,description) VALUES ('400','groceries');
+   ```
+   Verify that your data was added by executing the following command:
+   ```
+   SELECT * FROM trasactions;
+   ```
+6. When finished, just type exit and hit enter to exit the MySQL client.
+
+### Configure App Instance
+
+1. The first thing we will do is update our database credentials for the app tier. To do this, open the <b>application-code/app-tier/DbConfig.js</b> file from the github repo in your favorite text editor on your computer. You’ll see empty strings for the hostname, user, password and database. Fill this in with the credentials you configured for your database, the <b>writer</b> endpoint of your database as the hostname, and <b>webappdb</b> for the database. Save the file.
+
+   <b>NOTE</b>: <i> This is NOT considered a best practice, and is done for the simplicity of the lab. Moving these credentials to a more suitable place like Secrets Manager is left as an extension for this workshop.</i>
+   <image>
+
+2. Upload the app-tier folder to the S3 bucket that you created in part 0.
+
+3. Go back to your SSM session. Now we need to install all of the necessary components to run our backend application. Start by installing NVM (node version manager).
+   ```
+   curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.38.0/install.sh | bash
+   source ~/.bashrc
+   ```
+4. Next, install a compatible version of Node.js and make sure it's being used
+   ```
+   nvm install 16
+   nvm use 16
+   ```
+5. PM2 is a daemon process manager that will keep our node.js app running when we exit the instance or if it is rebooted. Install that as well.
+   ```
+   npm install -g pm2
+   ```
+6. Now we need to download our code from our s3 buckets onto our instance. In the command below, replace BUCKET_NAME with the name of the bucket you uploaded the app-tier folder to:
+   ```
+   cd ~/
+   aws s3 cp s3://BUCKET_NAME/app-tier/ app-tier --recursive
+   ```
+7. Navigate to the app directory, install dependencies, and start the app with pm2.
+
+   ```
+   cd ~/app-tier
+   npm install
+   pm2 start index.js
+   ```
+
+   To make sure the app is running correctly run the following:
+
+   ```
+   pm2 list
+   ```
+
+   If you see a status of online, the app is running. If you see errored, then you need to do some troubleshooting. To look at the latest errors, use this command:
+
+   ```
+   pm2 logs
+   ```
+
+   <b>NOTE:</b> If you’re having issues, check your configuration file for any typos, and double check that you have followed all installation commands till now.
+
+8. Right now, pm2 is just making sure our app stays running when we leave the SSM session. However, if the server is interrupted for some reason, we still want the app to start and keep running. This is also important for the AMI we will create:
+
+   ```
+   pm2 startup
+   ```
+
+   After running this you will see a message similar to this.
+
+   ```
+   [PM2] To setup the Startup Script, copy/paste the following command: sudo env PATH=$PATH:/home/ec2-user/.nvm/versions/node/v16.0.0/bin /home/ec2-user/.nvm/versions/node/v16.0.0/lib/node_modules/pm2/bin/pm2 startup systemd -u ec2-user —hp /home/ec2-user
+   ```
+
+   <b>DO NOT run the above command,</b> rather you should copy and past the command in the output you see in your own terminal. After you run it, save the current list of node processes with the following command:
+
+   ```
+   pm2 save
+   ```
+
+### Test App Tier
+
+Now let's run a couple tests to see if our app is configured correctly and can retrieve data from the database.
+
+To hit out health check endpoint, copy this command into your SSM terminal. This is our simple health check endpoint that tells us if the app is simply running.
+
+```shell
+curl http://localhost:4000/health
+```
+
+The response should looks like the following:
+
+```
+"This is the health check"
+```
+
+Next, test your database connection. You can do that by hitting the following endpoint locally:
+
+```bash
+curl http://localhost:4000/transaction
+```
+
+You should see a response containing the test data we added earlier:
+
+```json
+{
+  "result": [
+    { "id": 1, "amount": 400, "description": "groceries" },
+    { "id": 2, "amount": 100, "description": "class" },
+    { "id": 3, "amount": 200, "description": "other groceries" },
+    { "id": 4, "amount": 10, "description": "brownies" }
+  ]
+}
+```
+
+If you see both of these responses, then your networking, security, database and app configurations are correct.
+
+<b>Congrats! Your app layer is fully configured and ready to go. </b>
+
+## Internal Load Balancing and Auto Scaling
+
+In this section,we will create an Amazon Machine Image (AMI) of the app tier instance we just created, and use that to set up autoscaling with a load balancer in order to make this tier highly available.
+
+- <b>Learning Objectives:</b>
+  - Create an AMI of our App Tier
+  - Create a Launch Template
+  - Configure Autoscaling
+  - Deploy Internal Load Balancer
+
 ## License
 
 This library is licensed under the MIT-0 License. See the LICENSE file.
